@@ -33,30 +33,6 @@ COPY . .
 # Create necessary directories
 RUN mkdir -p data models logs temp
 
-# Download models during build (optional - can be done at runtime)
-RUN python -c "
-import torch
-from ultralytics import YOLO
-import clip
-from sentence_transformers import SentenceTransformer
-
-print('Downloading models...')
-# Download YOLOv8
-model = YOLO('yolov8n.pt')
-print('YOLOv8 downloaded')
-
-# Download CLIP
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-clip_model, preprocess = clip.load('ViT-B/32', device=device)
-print('CLIP downloaded')
-
-# Download sentence transformer
-st_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
-print('Sentence transformer downloaded')
-
-print('All models downloaded successfully')
-"
-
 # Set environment variables
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
