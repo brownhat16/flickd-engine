@@ -1,5 +1,5 @@
 import torch
-from transformers import CLIPProcessor, CLIPModel
+import clip
 import faiss
 import numpy as np
 from PIL import Image
@@ -10,18 +10,18 @@ from typing import List, Dict, Any, Optional
 import logging
 
 class ProductMatcher:
-    def __init__(self, catalog_path: str, model_name: str = "openai/clip-vit-base-patch32"):
+    def __init__(self, catalog_path: str):
         """
-        Initialize product matcher with CLIP model
+        CLIP + FAISS based product matcher as per hackathon requirements
         
-        Args:
-            catalog_path: Path to product catalog CSV
-            model_name: CLIP model to use
+        Uses cosine similarity to match detected items against catalog
+        Labels results as: Exact Match (>0.9), Similar Match (0.75-0.9), No Match (<0.75)
         """
-        self.model = CLIPModel.from_pretrained(model_name)
-        self.processor = CLIPProcessor.from_pretrained(model_name)
+        # Load CLIP model
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.model, self.preprocess = clip.load("ViT-B/32", device=self.device)
         
-        # Load and process catalog
+        # Load catalog data
         self.catalog_data = self._load_catalog(catalog_path)
         self.embeddings_index = self._build_embeddings_index()
         
@@ -29,25 +29,30 @@ class ProductMatcher:
         self.logger = logging.getLogger(__name__)
     
     def _load_catalog(self, catalog_path: str) -> List[Dict[str, Any]]:
-        """Load product catalog from CSV"""
+        """Load product catalog from provided CSV files"""
         try:
-            df = pd.read_csv(catalog_path)
+            # Load images.csv for image URLs
+            images_df = pd.read_csv('data/images.csv')
             
-            # Handle the provided catalog structure
-            if 'image_url' in df.columns:
-                # Use the images.csv format
-                catalog = []
-                for _, row in df.iterrows():
+            # Load product_data.csv for product details
+            products_df = pd.read_csv('data/product_data.csv')
+            
+            # Merge the data
+            catalog = []
+            for _, product in products_df.iterrows():
+                product_images = images_df[images_df['id'] == product['id']]
+                if not product_images.empty:
+                    # Use first image for each product
+                    image_url = product_images.iloc[0]['image_url']
+                    
                     catalog.append({
-                        'id': row['id'],
-                        'image_url': row['image_url'],
-                        'title': f"Product {row['id']}",  # Default title
-                        'description': "",
-                        'product_type': "unknown"
+                        'id': product['id'],
+                        'title': product['title'],
+                        'description': product['description'],
+                        'product_type': product['product_type'],
+                        'image_url': image_url,
+                        'price': product.get('price_display_amount', 0)
                     })
-            else:
-                # Use the product_data.csv format
-                catalog = df.to_dict('records')
             
             self.logger.info(f"Loaded {len(catalog)} products from catalog")
             return catalog
@@ -67,25 +72,25 @@ class ProductMatcher:
             self.logger.warning(f"Failed to download image {image_url}: {e}")
             return None
     
-    def _get_image_embedding(self, image: Image.Image) -> np.ndarray:
+    def _get_clip_embedding(self, image: Image.Image) -> np.ndarray:
         """Get CLIP embedding for image"""
         try:
-            inputs = self.processor(images=image, return_tensors="pt")
+            image_input = self.preprocess(image).unsqueeze(0).to(self.device)
             with torch.no_grad():
-                image_features = self.model.get_image_features(**inputs)
-                # Normalize the embedding
+                image_features = self.model.encode_image(image_input)
+                # Normalize for cosine similarity
                 image_features = image_features / image_features.norm(dim=-1, keepdim=True)
                 return image_features.cpu().numpy().flatten()
         except Exception as e:
-            self.logger.error(f"Error getting image embedding: {e}")
-            return np.zeros(512)  # Return zero embedding on error
+            self.logger.error(f"Error getting CLIP embedding: {e}")
+            return np.zeros(512)
     
     def _build_embeddings_index(self) -> faiss.IndexFlatIP:
         """Build FAISS index for product embeddings"""
         embeddings = []
         valid_products = []
         
-        self.logger.info("Building embeddings index...")
+        self.logger.info("Building CLIP embeddings index...")
         
         for i, product in enumerate(self.catalog_data):
             if i % 50 == 0:
@@ -93,12 +98,10 @@ class ProductMatcher:
             
             image = self._download_image(product['image_url'])
             if image:
-                embedding = self._get_image_embedding(image)
-                embeddings.append(embedding)
-                valid_products.append(product)
-            else:
-                # Skip products with failed image downloads
-                continue
+                embedding = self._get_clip_embedding(image)
+                if not np.allclose(embedding, 0):
+                    embeddings.append(embedding)
+                    valid_products.append(product)
         
         # Update catalog to only include products with valid embeddings
         self.catalog_data = valid_products
@@ -113,27 +116,24 @@ class ProductMatcher:
         
         embeddings = np.array(embeddings).astype('float32')
         
-        # Build FAISS index for cosine similarity
+        # Build FAISS index for cosine similarity (Inner Product with normalized vectors)
         index = faiss.IndexFlatIP(embeddings.shape[1])
         index.add(embeddings)
         
         self.logger.info(f"Built index with {len(embeddings)} embeddings")
         return index
     
-    def match_detected_item(self, frame: np.ndarray, bbox: List[int], top_k: int = 5) -> Dict[str, Any]:
+    def match_detected_item(self, frame: np.ndarray, bbox: List[int]) -> Dict[str, Any]:
         """
-        Match detected item with catalog products
+        Match detected item with catalog products using CLIP + FAISS
         
-        Args:
-            frame: Input frame
-            bbox: Bounding box [x, y, w, h]
-            top_k: Number of top matches to return
-            
-        Returns:
-            Dictionary with match results
+        Returns match result with similarity classification as per hackathon specs:
+        - Exact Match (similarity > 0.9)
+        - Similar Match (0.75–0.9)  
+        - No Match (< 0.75)
         """
         try:
-            # Crop detected item from frame
+            # Crop detected object from frame
             x, y, w, h = bbox
             
             # Ensure coordinates are within frame bounds
@@ -150,16 +150,16 @@ class ProductMatcher:
             
             cropped_image = Image.fromarray(cropped_item)
             
-            # Get embedding for cropped item
-            item_embedding = self._get_image_embedding(cropped_image)
+            # Generate CLIP embedding for cropped item
+            item_embedding = self._get_clip_embedding(cropped_image)
             
             if np.allclose(item_embedding, 0):
                 return self._no_match_result()
             
             item_embedding = item_embedding.reshape(1, -1).astype('float32')
             
-            # Search in catalog
-            similarities, indices = self.embeddings_index.search(item_embedding, k=min(top_k, len(self.catalog_data)))
+            # Search in catalog using FAISS
+            similarities, indices = self.embeddings_index.search(item_embedding, k=1)
             
             if len(indices[0]) == 0:
                 return self._no_match_result()
@@ -167,10 +167,10 @@ class ProductMatcher:
             best_match_idx = indices[0][0]
             similarity_score = float(similarities[0][0])
             
-            # Classify match quality
+            # Classify match quality as per hackathon requirements
             if similarity_score > 0.9:
                 match_type = "exact"
-            elif similarity_score > 0.75:
+            elif similarity_score >= 0.75:
                 match_type = "similar"
             else:
                 match_type = "no_match"
@@ -179,15 +179,7 @@ class ProductMatcher:
                 'matched_product_id': self.catalog_data[best_match_idx]['id'],
                 'similarity_score': similarity_score,
                 'match_type': match_type,
-                'product_info': self.catalog_data[best_match_idx],
-                'all_matches': [
-                    {
-                        'product_id': self.catalog_data[indices[0][i]]['id'],
-                        'similarity': float(similarities[0][i]),
-                        'product_info': self.catalog_data[indices[0][i]]
-                    }
-                    for i in range(len(indices[0]))
-                ]
+                'product_info': self.catalog_data[best_match_idx]
             }
             
         except Exception as e:
@@ -200,6 +192,5 @@ class ProductMatcher:
             'matched_product_id': None,
             'similarity_score': 0.0,
             'match_type': 'no_match',
-            'product_info': None,
-            'all_matches': []
+            'product_info': None
         }
