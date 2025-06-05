@@ -15,4 +15,5 @@ python-multipart==0.0.6
 assemblyai==0.17.0
 moviepy==1.0.3
 scikit-learn==1.3.0
-openai-clip
+redis==4.6.0
+python-dotenv==1.0.0
