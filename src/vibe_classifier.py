@@ -3,46 +3,58 @@ import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from typing import List, Dict, Any
 import re
+import json
 
 class VibeClassifier:
-    def __init__(self, model_name: str = 'sentence-transformers/all-MiniLM-L6-v2'):
+    def __init__(self, vibes_json_path: str = None):
         """
-        Initialize vibe classifier
+        NLP-based vibe classifier for the 7 official Flickd vibes
         
-        Args:
-            model_name: Sentence transformer model to use
+        Classifies videos into 1-3 vibes from the official list:
+        Coquette, Clean Girl, Cottagecore, Streetcore, Y2K, Boho, Party Glam
         """
-        self.model = SentenceTransformer(model_name)
+        self.model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
         
-        # Vibe definitions based on Flickd requirements
+        # Official Flickd vibes from hackathon requirements
+        self.official_vibes = [
+            "Coquette",
+            "Clean Girl", 
+            "Cottagecore",
+            "Streetcore",
+            "Y2K",
+            "Boho",
+            "Party Glam"
+        ]
+        
+        # Enhanced vibe definitions for better classification
         self.vibe_definitions = {
             'Coquette': {
-                'keywords': ['feminine', 'romantic', 'soft', 'pink', 'bow', 'lace', 'floral', 'delicate', 'sweet', 'girly', 'cute', 'pretty', 'dainty'],
-                'description': 'Feminine, romantic style with soft colors, bows, lace, and delicate details. Sweet and girly aesthetic.'
+                'keywords': ['feminine', 'romantic', 'soft', 'pink', 'bow', 'lace', 'floral', 'delicate', 'sweet', 'girly', 'cute', 'pretty', 'dainty', 'milkmaid', 'puff sleeves'],
+                'description': 'Feminine, romantic style with soft colors, bows, lace, and delicate details. Sweet and girly aesthetic with puff sleeves and floral patterns.'
             },
             'Clean Girl': {
-                'keywords': ['minimal', 'natural', 'effortless', 'simple', 'fresh', 'dewy', 'neutral', 'understated', 'clean', 'basic'],
-                'description': 'Minimalist, natural beauty with effortless styling and neutral tones. Simple and clean aesthetic.'
+                'keywords': ['minimal', 'natural', 'effortless', 'simple', 'fresh', 'dewy', 'neutral', 'understated', 'clean', 'basic', 'no makeup', 'slicked back'],
+                'description': 'Minimalist, natural beauty with effortless styling and neutral tones. Simple and clean aesthetic with no-makeup makeup look.'
             },
             'Cottagecore': {
-                'keywords': ['rustic', 'vintage', 'floral', 'pastoral', 'countryside', 'cozy', 'handmade', 'natural', 'cottage', 'rural', 'garden'],
-                'description': 'Rustic, vintage-inspired aesthetic with floral patterns and countryside vibes. Cozy and natural.'
+                'keywords': ['rustic', 'vintage', 'floral', 'pastoral', 'countryside', 'cozy', 'handmade', 'natural', 'cottage', 'rural', 'garden', 'prairie', 'earthy'],
+                'description': 'Rustic, vintage-inspired aesthetic with floral patterns and countryside vibes. Cozy and natural with handmade elements.'
             },
             'Streetcore': {
-                'keywords': ['urban', 'edgy', 'casual', 'street', 'hip-hop', 'sneakers', 'oversized', 'bold', 'cool', 'trendy', 'swag'],
-                'description': 'Urban, edgy street style with casual and bold fashion choices. Cool and trendy vibe.'
+                'keywords': ['urban', 'edgy', 'casual', 'street', 'hip-hop', 'sneakers', 'oversized', 'bold', 'cool', 'trendy', 'swag', 'baggy', 'graphic'],
+                'description': 'Urban, edgy street style with casual and bold fashion choices. Cool and trendy vibe with oversized fits and sneakers.'
             },
             'Y2K': {
-                'keywords': ['futuristic', 'metallic', 'cyber', 'tech', 'holographic', 'neon', 'space-age', 'digital', 'retro-future', 'shiny'],
-                'description': 'Futuristic, tech-inspired fashion with metallic and cyber elements. Retro-futuristic aesthetic.'
+                'keywords': ['futuristic', 'metallic', 'cyber', 'tech', 'holographic', 'neon', 'space-age', 'digital', 'retro-future', 'shiny', '2000s', 'chrome'],
+                'description': 'Futuristic, tech-inspired fashion with metallic and cyber elements. Retro-futuristic aesthetic from the 2000s era.'
             },
             'Boho': {
-                'keywords': ['bohemian', 'free-spirited', 'ethnic', 'flowing', 'earthy', 'layered', 'artistic', 'eclectic', 'hippie', 'relaxed'],
-                'description': 'Bohemian, free-spirited style with flowing fabrics and earthy tones. Artistic and eclectic.'
+                'keywords': ['bohemian', 'free-spirited', 'ethnic', 'flowing', 'earthy', 'layered', 'artistic', 'eclectic', 'hippie', 'relaxed', 'fringe', 'paisley'],
+                'description': 'Bohemian, free-spirited style with flowing fabrics and earthy tones. Artistic and eclectic with layered accessories.'
             },
             'Party Glam': {
-                'keywords': ['glamorous', 'sparkly', 'sequins', 'party', 'dressy', 'elegant', 'shiny', 'formal', 'glittery', 'fancy'],
-                'description': 'Glamorous party wear with sparkles, sequins, and elegant details. Fancy and dressy.'
+                'keywords': ['glamorous', 'sparkly', 'sequins', 'party', 'dressy', 'elegant', 'shiny', 'formal', 'glittery', 'fancy', 'cocktail', 'evening'],
+                'description': 'Glamorous party wear with sparkles, sequins, and elegant details. Fancy and dressy for special occasions.'
             }
         }
         
@@ -59,17 +71,16 @@ class VibeClassifier:
             embeddings[vibe] = embedding
         return embeddings
     
-    def classify_vibes(self, text: str, top_k: int = 3, threshold: float = 0.3) -> List[str]:
+    def classify_vibes(self, text: str, max_vibes: int = 3) -> List[str]:
         """
-        Classify text into fashion vibes
+        Classify text into 1-3 fashion vibes from the official Flickd list
         
         Args:
-            text: Input text (caption, transcript, etc.)
-            top_k: Maximum number of vibes to return
-            threshold: Minimum similarity threshold
+            text: Input text (caption + hashtags or audio transcript)
+            max_vibes: Maximum number of vibes to return (1-3 as per hackathon)
             
         Returns:
-            List of classified vibes
+            List of classified vibes (1-3 vibes max)
         """
         if not text or len(text.strip()) < 3:
             return []
@@ -92,69 +103,21 @@ class VibeClassifier:
         # Sort by similarity and return top vibes
         sorted_vibes = sorted(vibe_scores.items(), key=lambda x: x[1], reverse=True)
         
-        # Filter vibes with similarity > threshold
+        # Apply threshold and return top vibes (1-3 max)
+        threshold = 0.25  # Lower threshold for better recall
         relevant_vibes = [(vibe, score) for vibe, score in sorted_vibes if score > threshold]
         
-        return [vibe for vibe, score in relevant_vibes[:top_k]]
-    
-    def classify_vibes_with_scores(self, text: str, top_k: int = 3) -> List[Dict[str, Any]]:
-        """
-        Classify text into fashion vibes with confidence scores
-        
-        Returns:
-            List of dictionaries with vibe and confidence score
-        """
-        if not text or len(text.strip()) < 3:
-            return []
-        
-        # Clean and preprocess text
-        text = self._preprocess_text(text)
-        
-        if not text:
-            return []
-        
-        # Get text embedding
-        text_embedding = self.model.encode([text])
-        
-        # Calculate similarities with each vibe
-        vibe_scores = {}
-        for vibe, vibe_embedding in self.vibe_embeddings.items():
-            similarity = cosine_similarity(text_embedding, vibe_embedding)[0][0]
-            vibe_scores[vibe] = similarity
-        
-        # Sort by similarity and return top vibes with scores
-        sorted_vibes = sorted(vibe_scores.items(), key=lambda x: x[1], reverse=True)
-        
-        return [
-            {'vibe': vibe, 'confidence': float(score)}
-            for vibe, score in sorted_vibes[:top_k]
-        ]
+        # Return top vibes (max 3 as per hackathon requirements)
+        return [vibe for vibe, score in relevant_vibes[:max_vibes]]
     
     def _preprocess_text(self, text: str) -> str:
         """Clean and preprocess text"""
-        # Remove hashtags, mentions, and special characters
-        text = re.sub(r'#\w+', '', text)
+        # Remove hashtags but keep the content
+        text = re.sub(r'#(\w+)', r'\1', text)
+        # Remove mentions
         text = re.sub(r'@\w+', '', text)
+        # Remove extra whitespace and special characters
         text = re.sub(r'[^\w\s]', ' ', text)
-        
-        # Remove extra whitespace
         text = ' '.join(text.split())
         
         return text.lower().strip()
-    
-    def analyze_keywords(self, text: str) -> Dict[str, List[str]]:
-        """
-        Analyze which keywords from each vibe are present in the text
-        
-        Returns:
-            Dictionary mapping vibes to found keywords
-        """
-        text_lower = text.lower()
-        found_keywords = {}
-        
-        for vibe, info in self.vibe_definitions.items():
-            found = [keyword for keyword in info['keywords'] if keyword in text_lower]
-            if found:
-                found_keywords[vibe] = found
-        
-        return found_keywords
